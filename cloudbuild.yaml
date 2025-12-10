@@ -1,0 +1,40 @@
+steps:
+  # 1. Сборка Docker образа
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/church-bot-fastapi:$COMMIT_SHA', '.']
+  
+  # 2. Пуш образа в Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/church-bot-fastapi:$COMMIT_SHA']
+  
+  # 3. Деплой на Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'church-bot-fastapi'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/church-bot-fastapi:$COMMIT_SHA'
+      - '--region'
+      - 'us-central1'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+      - '--set-env-vars'
+      - 'TELEGRAM_TOKEN=8222471116:AAHrtzaSSxzPR3QvQUDXxOqtoAgZhenepMo,SHEET_ID=1FTizLD3weTMNQB8PXczXXKTL55PTP1DnMaOr0350tQw,MAIN_ADMIN_ID=526710245,ENVIRONMENT=production,LOG_LEVEL=INFO,SESSION_STORAGE=memory'
+      - '--memory'
+      - '1Gi'
+      - '--cpu'
+      - '2'
+      - '--max-instances'
+      - '10'
+      - '--concurrency'
+      - '100'
+      - '--timeout'
+      - '300s'
+      - '--min-instances'
+      - '1'
+
+images:
+  - 'gcr.io/$PROJECT_ID/church-bot-fastapi:$COMMIT_SHA'
