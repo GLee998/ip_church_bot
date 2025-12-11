@@ -38,3 +38,6 @@ steps:
 
 images:
   - 'gcr.io/$PROJECT_ID/church-bot-fastapi:$COMMIT_SHA'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
