@@ -22,7 +22,7 @@ steps:
       - 'managed'
       - '--allow-unauthenticated'
       - '--set-env-vars'
-      - 'TELEGRAM_TOKEN=8222471116:AAHrtzaSSxzPR3QvQUDXxOqtoAgZhenepMo,SHEET_ID=1FTizLD3weTMNQB8PXczXXKTL55PTP1DnMaOr0350tQw,MAIN_ADMIN_ID=526710245,ENVIRONMENT=production,LOG_LEVEL=INFO,SESSION_STORAGE=memory'
+      - 'TELEGRAM_TOKEN=8222471116:AAHrtzaSSxzPR3QvQUDXxOqtoAgZhenepMo,SHEET_ID=1FTizLD3weTMNQB8PXczXXKTL55PTP1DnMaOr0350tQw,MAIN_ADMIN_ID=526710245,ENVIRONMENT=production,LOG_LEVEL=INFO,SESSION_STORAGE=memory, SERVICE_URL=https://church-bot-fastapi-522997508336.us-central1.run.app'
       - '--memory'
       - '1Gi'
       - '--cpu'
