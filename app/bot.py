@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
+from telegram.error import BadRequest
 
 from app.config import settings
 from app.sheets import sheets_client
@@ -92,7 +93,14 @@ class TelegramBot:
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик callback-запросов"""
         query = update.callback_query
-        await query.answer()
+        try:
+            # Строка 95
+            await query.answer() 
+        except BadRequest as e:
+            # Логируем ошибку и игнорируем, если запрос слишком старый.
+            # Это предотвратит сбой 500, который мы видели в логах.
+            logger.warning(f"⚠️ Failed to answer expired callback query: {e}")
+            pass # Продолжаем выполнение, чтобы попытаться обновить сообщение, если это возможно.
         
         chat_id = query.message.chat.id
         data = query.data
