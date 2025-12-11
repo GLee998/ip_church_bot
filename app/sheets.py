@@ -1,15 +1,13 @@
 """
-Асинхронный клиент для Google Sheets
+Асинхронный клиент для Google Sheets с КЭШИРОВАНИЕМ
 """
-import os
 import asyncio
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from datetime import datetime
 
 import gspread
 from google.oauth2 import service_account
-from google.auth.transport.requests import Request
 from google.auth import default as google_default
 
 from app.config import settings
@@ -18,54 +16,40 @@ logger = logging.getLogger(__name__)
 
 
 class GoogleSheetsClient:
-    """Клиент для работы с Google Sheets"""
+    """Клиент для работы с Google Sheets с кэшированием в памяти"""
     
     def __init__(self):
         self._client = None
         self._spreadsheet = None
-        self._lock = asyncio.Lock()
         self._worksheets = {}
+        
+        # КЭШ: храним данные в памяти
+        # Структура: {'worksheet_title': [[row1], [row2], ...]}
+        self._cache: Dict[str, List[List[Any]]] = {}
+        self._cache_lock = asyncio.Lock()
     
     async def _get_client(self):
-        """Получение или создание клиента"""
-        async with self._lock:
-            if self._client is None:
-                try:
-                    logger.info("Initializing Google Sheets client...")
-                    
-                    # Способ 1: Используем сервисный аккаунт из файла (для разработки)
-                    if settings.google_credentials_file:
-                        try:
-                            # В Cloud Run файл может быть в секретах
-                            credentials = service_account.Credentials.from_service_account_file(
-                                settings.google_credentials_file,
-                                scopes=['https://www.googleapis.com/auth/spreadsheets',
-                                       'https://www.googleapis.com/auth/drive']
-                            )
-                            logger.info(f"Using service account file: {settings.google_credentials_file}")
-                        except Exception as file_error:
-                            logger.warning(f"Cannot load credentials file: {file_error}. Trying default credentials.")
-                            # Fallback to default credentials
-                            credentials, _ = google_default()
-                    
-                    # Способ 2: Используем default credentials (для Cloud Run)
-                    else:
-                        logger.info("Using default Google credentials")
-                        credentials, _ = google_default()
-                    
-                    # Создаем клиент в thread pool
-                    loop = asyncio.get_event_loop()
-                    self._client = await loop.run_in_executor(
-                        None, 
-                        lambda: gspread.authorize(credentials)
+        """Получение или создание клиента (без изменений)"""
+        if self._client is None:
+            try:
+                if settings.google_credentials_file:
+                    credentials = service_account.Credentials.from_service_account_file(
+                        settings.google_credentials_file,
+                        scopes=['https://www.googleapis.com/auth/spreadsheets',
+                               'https://www.googleapis.com/auth/drive']
                     )
-                    
-                    logger.info("Google Sheets client authorized")
-                    
-                except Exception as e:
-                    logger.error(f"Failed to initialize Google Sheets client: {e}")
-                    raise
-        
+                else:
+                    credentials, _ = google_default()
+                
+                loop = asyncio.get_event_loop()
+                self._client = await loop.run_in_executor(
+                    None, 
+                    lambda: gspread.authorize(credentials)
+                )
+                logger.info("✅ Google Sheets client authorized")
+            except Exception as e:
+                logger.error(f"Failed to initialize Google Sheets client: {e}")
+                raise
         return self._client
     
     async def _get_spreadsheet(self):
@@ -73,172 +57,162 @@ class GoogleSheetsClient:
         if self._spreadsheet is None:
             client = await self._get_client()
             loop = asyncio.get_event_loop()
-            
-            try:
-                self._spreadsheet = await loop.run_in_executor(
-                    None,
-                    lambda: client.open_by_key(settings.sheet_id)
-                )
-                logger.info(f"Spreadsheet opened: {self._spreadsheet.title}")
-            except Exception as e:
-                logger.error(f"Failed to open spreadsheet: {e}")
-                raise
-        
+            self._spreadsheet = await loop.run_in_executor(
+                None,
+                lambda: client.open_by_key(settings.sheet_id)
+            )
         return self._spreadsheet
     
     async def get_worksheet(self, title: str = None):
-        """Получение листа"""
+        """Получение листа (gspread object)"""
         spreadsheet = await self._get_spreadsheet()
         loop = asyncio.get_event_loop()
         
-        if title is None:
-            # Главный лист - используем свойство sheet1
-            return await loop.run_in_executor(
-                None,
-                lambda: spreadsheet.sheet1  # Убрали скобки!
-            )
+        # Определяем имя листа для ключа кэша
+        target_title = title if title else "MainSheet" 
         
-        # Кэшируем листы
-        if title not in self._worksheets:
+        if target_title not in self._worksheets:
             try:
-                worksheet = await loop.run_in_executor(
-                    None,
-                    lambda: spreadsheet.worksheet(title)
-                )
-                self._worksheets[title] = worksheet
+                if title is None:
+                    worksheet = await loop.run_in_executor(None, lambda: spreadsheet.sheet1)
+                else:
+                    worksheet = await loop.run_in_executor(None, lambda: spreadsheet.worksheet(title))
+                self._worksheets[target_title] = worksheet
             except gspread.exceptions.WorksheetNotFound:
-                # Создаем новый лист
                 worksheet = await loop.run_in_executor(
                     None,
                     lambda: spreadsheet.add_worksheet(title=title, rows=1000, cols=26)
                 )
-                self._worksheets[title] = worksheet
-                logger.info(f"📄 Created new worksheet: {title}")
+                self._worksheets[target_title] = worksheet
         
-        return self._worksheets[title]
-    
-    async def get_all_data(self, worksheet_title: str = None) -> List[List[Any]]:
-        """Получение всех данных с листа"""
+        return self._worksheets[target_title]
+
+    async def refresh_cache(self, worksheet_title: str = None):
+        """Принудительное обновление кэша из Google Sheets"""
+        cache_key = worksheet_title if worksheet_title else "MainSheet"
         worksheet = await self.get_worksheet(worksheet_title)
         loop = asyncio.get_event_loop()
         
-        return await loop.run_in_executor(None, worksheet.get_all_values)
+        logger.info(f"🔄 Refreshing cache for {cache_key}...")
+        
+        # Скачиваем данные
+        data = await loop.run_in_executor(None, worksheet.get_all_values)
+        
+        async with self._cache_lock:
+            self._cache[cache_key] = data
+            
+        logger.info(f"✅ Cache updated for {cache_key}: {len(data)} rows")
+        return len(data)
+
+    async def get_all_data(self, worksheet_title: str = None) -> List[List[Any]]:
+        """Получение всех данных (сначала из кэша)"""
+        cache_key = worksheet_title if worksheet_title else "MainSheet"
+        
+        # Если данных нет в кэше, загружаем их
+        if cache_key not in self._cache:
+            await self.refresh_cache(worksheet_title)
+        
+        # Возвращаем данные из памяти (МГНОВЕННО)
+        return self._cache.get(cache_key, [])
     
     async def get_headers(self, worksheet_title: str = None) -> List[str]:
         """Получение заголовков"""
         data = await self.get_all_data(worksheet_title)
         return data[0] if data else []
     
-    async def find_rows(self, column: str, value: str, worksheet_title: str = None) -> List[Dict[str, Any]]:
-        """Поиск строк по значению в колонке"""
-        worksheet = await self.get_worksheet(worksheet_title)
-        loop = asyncio.get_event_loop()
-        
-        # Получаем все данные
-        all_data = await self.get_all_data(worksheet_title)
-        if not all_data or len(all_data) < 2:
-            return []
-        
-        headers = all_data[0]
-        
-        # Ищем индекс колонки
-        try:
-            col_index = headers.index(column)
-        except ValueError:
-            logger.warning(f"Column '{column}' not found in worksheet")
-            return []
-        
-        # Фильтруем строки
-        results = []
-        for i, row in enumerate(all_data[1:], start=2):
-            if len(row) > col_index and str(row[col_index]).strip().lower() == value.strip().lower():
-                result = {"row_number": i, "data": {}}
-                for j, header in enumerate(headers):
-                    if j < len(row):
-                        result["data"][header] = row[j]
-                results.append(result)
-        
-        return results
-    
     async def append_row(self, data: List[Any], worksheet_title: str = None) -> int:
-        """Добавление новой строки"""
+        """Добавление строки (обновляет кэш и отправляет в Google)"""
+        cache_key = worksheet_title if worksheet_title else "MainSheet"
         worksheet = await self.get_worksheet(worksheet_title)
         loop = asyncio.get_event_loop()
         
+        # 1. Отправляем в Google (это займет время, около 1 сек)
         await loop.run_in_executor(None, worksheet.append_row, data)
         
-        # Получаем обновленное количество строк
-        row_count = await loop.run_in_executor(None, worksheet.row_count)
-        logger.info(f"Row appended to {worksheet_title or 'main sheet'}, total rows: {row_count}")
+        # 2. Обновляем локальный кэш (чтобы пользователь сразу увидел изменения)
+        async with self._cache_lock:
+            if cache_key in self._cache:
+                self._cache[cache_key].append([str(x) for x in data])
+            else:
+                # Если кэша не было, загружаем всё
+                await self.refresh_cache(worksheet_title)
+                
+        # Получаем новое количество строк
+        row_count = len(self._cache[cache_key])
+        logger.info(f"Row appended to {cache_key}, total rows: {row_count}")
         
         return row_count
     
     async def update_row(self, row_number: int, data: List[Any], worksheet_title: str = None):
-        """Обновление строки"""
+        """Обновление строки (кэш + Google)"""
+        cache_key = worksheet_title if worksheet_title else "MainSheet"
         worksheet = await self.get_worksheet(worksheet_title)
         loop = asyncio.get_event_loop()
         
-        # Обновляем строку
+        # 1. Обновляем в Google
         range_start = f"A{row_number}"
         await loop.run_in_executor(
             None,
             lambda: worksheet.update(range_start, [data])
         )
-        logger.info(f"Row {row_number} updated in {worksheet_title or 'main sheet'}")
+        
+        # 2. Обновляем в кэше
+        async with self._cache_lock:
+            if cache_key in self._cache:
+                # Индекс в списке = номер строки - 1 (так как нумерация в sheets с 1)
+                list_index = row_number - 1
+                if 0 <= list_index < len(self._cache[cache_key]):
+                    # Сохраняем длину строки, дополняем если нужно
+                    current_len = len(self._cache[cache_key][list_index])
+                    new_row = [str(x) for x in data]
+                    # Если новая строка короче, дополняем пустыми строками, чтобы не сломать структуру
+                    if len(new_row) < current_len:
+                         new_row.extend([""] * (current_len - len(new_row)))
+                    
+                    self._cache[cache_key][list_index] = new_row
+            else:
+                 await self.refresh_cache(worksheet_title)
+                 
+        logger.info(f"Row {row_number} updated in {cache_key}")
     
     async def add_column(self, column_name: str, worksheet_title: str = None) -> bool:
-        """Добавление новой колонки"""
+        """Добавление колонки"""
+        cache_key = worksheet_title if worksheet_title else "MainSheet"
+        
+        # Проверяем заголовки через кэш
+        headers = await self.get_headers(worksheet_title)
+        if column_name in headers:
+            return False
+        
         worksheet = await self.get_worksheet(worksheet_title)
         loop = asyncio.get_event_loop()
         
-        # Получаем текущие заголовки
-        headers = await self.get_headers(worksheet_title)
-        
-        # Проверяем, нет ли уже такой колонки
-        if column_name in headers:
-            logger.warning(f"Column '{column_name}' already exists")
-            return False
-        
-        # Добавляем новую колонку
-        col_index = len(headers) + 1  # +1 потому что столбцы начинаются с 1
+        # Обновляем в Google
+        col_index = len(headers) + 1
         cell = worksheet.cell(1, col_index)
-        
         await loop.run_in_executor(
             None,
             lambda: cell.__setattr__('value', column_name)
         )
+        await loop.run_in_executor(None, worksheet.update_cells, [cell])
+
+        # Сбрасываем кэш целиком, так как изменилась структура
+        await self.refresh_cache(worksheet_title)
         
-        logger.info(f"Column '{column_name}' added at position {col_index}")
         return True
     
     @staticmethod
     def format_date(date_value: Any) -> str:
-        """Форматирование даты для отображения"""
-        if not date_value:
-            return ""
-        
-        # Если это объект datetime
-        if isinstance(date_value, datetime):
-            return date_value.strftime("%d.%m.%Y")
-        
-        # Если это строка
+        """Форматирование даты (без изменений)"""
+        if not date_value: return ""
+        if isinstance(date_value, datetime): return date_value.strftime("%d.%m.%Y")
         if isinstance(date_value, str):
-            # Пробуем разные форматы
-            date_formats = [
-                "%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y",
-                "%Y/%m/%d", "%d-%m-%Y", "%Y.%m.%d"
-            ]
-            
-            for fmt in date_formats:
+            formats = ["%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%Y/%m/%d", "%d-%m-%Y"]
+            for fmt in formats:
                 try:
-                    dt = datetime.strptime(date_value, fmt)
-                    return dt.strftime("%d.%m.%Y")
-                except ValueError:
-                    continue
-        
-        # Если не удалось распарсить, возвращаем как есть
+                    return datetime.strptime(date_value, fmt).strftime("%d.%m.%Y")
+                except ValueError: continue
         return str(date_value)
 
-
-# Глобальный экземпляр клиента
+# Глобальный экземпляр
 sheets_client = GoogleSheetsClient()

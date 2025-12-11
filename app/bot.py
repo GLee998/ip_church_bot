@@ -610,6 +610,19 @@ class TelegramBot:
             await self._show_access_logs(update, chat_id)
         elif text == '/admin stats':
             await self._show_admin_stats(update, chat_id)
+        elif text == '/admin reload':
+            await update.message.reply_text("🔄 Обновляю кэш базы данных...")
+            try:
+                # Сбрасываем кэш основного листа
+                count = await self.sheets.refresh_cache()
+                # Сбрасываем кэш пользователей и логов
+                auth_manager._users_cache = None 
+                auth_manager._logs_cache = None
+                
+                await update.message.reply_text(f"✅ База данных обновлена!\nЗагружено записей: {count}")
+            except Exception as e:
+                await update.message.reply_text(f"❌ Ошибка обновления: {e}")
+            return
         elif text.startswith('/admin add '):
             args = text.split()
             if len(args) < 3:
@@ -651,7 +664,8 @@ class TelegramBot:
                 "<code>/admin logs</code> - Логи доступа\n"
                 "<code>/admin stats</code> - Статистика\n"
                 "<code>/admin add USER_ID</code> - Добавить пользователя\n"
-                "<code>/admin remove USER_ID</code> - Удалить пользователя",
+                "<code>/admin remove USER_ID</code> - Удалить пользователя"
+                "<code>/admin reload</code> - Обновить базу из Google",
                 parse_mode='HTML'
             )
     
