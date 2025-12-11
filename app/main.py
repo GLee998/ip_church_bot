@@ -663,7 +663,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
     
     return JSONResponse(
-        status_code=500,
+        status_code=200,
         content={
             "error": "Internal server error",
             "message": str(exc) if settings.debug else "Something went wrong",
